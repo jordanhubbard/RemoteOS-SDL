@@ -40,8 +40,8 @@ make test
 Release archives contain `bin/remoteos-sdl`; source builds produce
 `./remoteos-sdl`. The binaries require the host SDL2, SDL2_image, and SDL2_ttf
 libraries. Install the dependencies above before launching either form.
-Choose the archive matching your host architecture. Version 0.1.0 publishes
-Linux x86_64 and macOS ARM64 archives; Linux ARM64 users can build from source
+Choose the archive matching your host architecture. Version 0.1.1 publishes
+Linux x86_64, Linux ARM64 (`aarch64`), and macOS ARM64 archives. Build from source
 or use the canonical service included in the RubyOS Linux ARM64 bundle.
 
 Keep an archive and its `.sha256` file together and run

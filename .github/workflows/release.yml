@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -24,11 +24,12 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install pkg-config sdl2 sdl2_image sdl2_ttf
-      - run: make package VERSION=${GITHUB_REF_NAME#v}
+      - run: make package VERSION="${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ runner.os }}-${{ runner.arch }}
           path: dist/*
+          if-no-files-found: error
 
   publish:
     needs: package

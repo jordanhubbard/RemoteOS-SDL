@@ -16,6 +16,8 @@ jobs:
         include:
           - name: Linux
             runner: ubuntu-24.04
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
           - name: macOS
             runner: macos-15
     runs-on: ${{ matrix.runner }}
