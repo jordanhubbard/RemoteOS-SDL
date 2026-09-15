@@ -17,8 +17,8 @@ cp -f LICENSE README.md PROTOCOL.md CHANGELOG.md "$stage/"
 mkdir -p dist
 tar -C build/package -czf "dist/$name.tar.gz" "$name"
 if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+    (cd dist && shasum -a 256 "$name.tar.gz") > "dist/$name.tar.gz.sha256"
 else
-    sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+    (cd dist && sha256sum "$name.tar.gz") > "dist/$name.tar.gz.sha256"
 fi
 printf '%s\n' "dist/$name.tar.gz"

@@ -19,6 +19,10 @@ part of the architecture.
 Dependencies are a C11 compiler, `pkg-config`, SDL2, SDL2_image, SDL2_ttf, and
 Python 3 for the protocol smoke test.
 
+Clone this repository and enter it before running the commands below.
+On Debian/Ubuntu (including WSL2), install `build-essential pkg-config python3
+libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev`.
+
 ```sh
 make
 make test
@@ -33,16 +37,28 @@ make test
 
 ## Run
 
+Release archives contain `bin/remoteos-sdl`; source builds produce
+`./remoteos-sdl`. The binaries require the host SDL2, SDL2_image, and SDL2_ttf
+libraries. Install the dependencies above before launching either form.
+Choose the archive matching your host architecture. Version 0.1.0 publishes
+Linux x86_64 and macOS ARM64 archives; Linux ARM64 users can build from source
+or use the canonical service included in the RubyOS Linux ARM64 bundle.
+
+Keep an archive and its `.sha256` file together and run
+`sha256sum -c <archive>.sha256` (macOS: `shasum -a 256 -c <archive>.sha256`).
+The original 0.1.0 checksum files include a `dist/` prefix; for those files,
+place the archive in a `dist` directory and check from its parent directory.
+
 When the guest connects to the service:
 
 ```sh
-remoteos-sdl --listen-tcp 127.0.0.1:17010
+./remoteos-sdl --listen-tcp 127.0.0.1:17010
 ```
 
 When the guest exposes its own display endpoint:
 
 ```sh
-remoteos-sdl --connect-tcp 192.0.2.10:17010
+./remoteos-sdl --connect-tcp 192.0.2.10:17010
 ```
 
 Set `REMOTEOS_SDL_MODE=headless` for automation. `REMOTEOS_SDL_SLOW_US`,
