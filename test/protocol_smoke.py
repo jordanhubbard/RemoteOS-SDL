@@ -79,8 +79,17 @@ def main() -> int:
                 display = call(connection, 3, "display.open", w=96, h=64,
                                title="RemoteOS protocol smoke")
                 framebuffer = display["fb_handle"]
-                call(connection, 4, "surface.fill_rect", handle=framebuffer,
-                     rgb=0x4A154B, rect={"x": 0, "y": 0, "w": 96, "h": 64})
+                batch = call(connection, 4, "render.batch", ops=[
+                    {"op": "surface.fill_rect", "params": {
+                        "handle": framebuffer, "rgb": 0x4A154B,
+                        "rect": {"x": 0, "y": 0, "w": 96, "h": 64},
+                    }},
+                    {"op": "sdl.call", "params": {
+                        "name": "SDL_FillRect",
+                        "args": [framebuffer, [4, 4, 8, 8], 0x00AAFFFF],
+                    }},
+                ])
+                assert batch == {"count": 2, "errors": 0}, batch
                 assert call(connection, 5, "frame.commit")["events"] == []
                 metrics = call(connection, 6, "telemetry.snapshot")
                 assert metrics["requests"] >= 6 and metrics["presents"] == 1, metrics

@@ -36,8 +36,9 @@ The baseline operation families are:
 - bounded host file import/export using opaque tokens and 32 KiB chunks;
 - diagnostics: `telemetry.snapshot` and `debug.capture`.
 
-`render.batch` accepts only response-free drawing operations. Binary trailers,
-generic SDL calls, handle-producing calls, presentation, and lifecycle calls
+`render.batch` accepts only response-free drawing operations, including the
+registered fill/blit subset of `sdl.call`. Binary trailers, return-bearing SDL
+calls, handle-producing calls, presentation, and lifecycle calls
 cannot be batched. The service rejects batches above its negotiated limit.
 `frame.commit` combines presentation and event polling. An ordered ID-zero
 `display.present` is preferable when no input or acknowledgement is needed.

@@ -1913,13 +1913,20 @@ static int op_sdl_call(BridgeState *st, int id, cJSON *params) {
  * rects, blits, text.draw — i.e. animation frames. Stateful ops that
  * return handles (surface.create, hello) MUST NOT be batched.
  */
-static int render_batch_op_allowed(const char *name) {
+static int render_batch_op_allowed(const char *name, cJSON *params) {
     static const char *allowed[] = {
         "surface.destroy", "surface.fill_rect", "surface.blit",
         "surface.scroll", "surface.line", "text.draw", NULL
     };
     for (int i = 0; allowed[i]; i++) {
         if (strcmp(name, allowed[i]) == 0) return 1;
+    }
+    if (strcmp(name, "sdl.call") == 0) {
+        cJSON *function = cJSON_GetObjectItemCaseSensitive(params, "name");
+        if (!cJSON_IsString(function)) return 0;
+        return strcmp(function->valuestring, "SDL_FillRect") == 0 ||
+               strcmp(function->valuestring, "SDL_FillRects") == 0 ||
+               strcmp(function->valuestring, "SDL_BlitSurface") == 0;
     }
     return 0;
 }
@@ -1941,7 +1948,7 @@ static int op_render_batch(BridgeState *st, int id, cJSON *params) {
         if (!cJSON_IsObject(entry)) { errors++; continue; }
         cJSON *op = cJSON_GetObjectItemCaseSensitive(entry, "op");
         cJSON *p  = cJSON_GetObjectItemCaseSensitive(entry, "params");
-        if (!cJSON_IsString(op) || !render_batch_op_allowed(op->valuestring)) {
+        if (!cJSON_IsString(op) || !render_batch_op_allowed(op->valuestring, p)) {
             errors++;
             continue;
         }

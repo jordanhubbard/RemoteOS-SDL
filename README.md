@@ -9,6 +9,11 @@ protocol is intentionally language-neutral: a four-byte big-endian JSON length,
 a UTF-8 request or response envelope, and an optional binary trailer. See
 [PROTOCOL.md](PROTOCOL.md) for the stable contract.
 
+The first coordinated release train is RemoteOS-SDL 0.1.x, PythonOS 0.4.x,
+and RubyOS 0.2.x. Both OS repositories pin this repository as
+`services/remoteos-sdl`; copied or language-branded companion binaries are not
+part of the architecture.
+
 ## Build and test
 
 Dependencies are a C11 compiler, `pkg-config`, SDL2, SDL2_image, SDL2_ttf, and

@@ -13,3 +13,6 @@ SDL time, because "the desktop felt slow once" is not a benchmark.
 Linux and macOS builds are tested and packaged by CI. Remote links remain a
 trusted-network concern; use an authenticated tunnel rather than introducing
 your new desktop to the entire internet.
+
+This release is the shared service for PythonOS 0.4.x and RubyOS 0.2.x. Both
+clients negotiate protocol v2 and intentionally reject the former v1 contract.
