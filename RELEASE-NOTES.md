@@ -1,4 +1,13 @@
-# RemoteOS-SDL v0.2.0
+# RemoteOS-SDL v0.2.1
+
+## The actual GPU would like a word
+
+0.2.1 fixes a driver-specific defect found by running the full media test on
+the DGX Spark NVIDIA GB10 after Mesa/Xvfb had passed. The hidden window's
+default framebuffer was not a valid offscreen rendering target. Explicit color
+and depth attachments now make that target independent of window visibility.
+The corrected path passes on real NVIDIA hardware and Mesa/Xvfb. This patch
+supersedes 0.2.0; its tag and artifacts remain intact for reproducibility.
 
 ## The display server has acquired a film department
 
@@ -36,4 +45,4 @@ PCM round trips, playback clock behavior and software depth/clipping. Linux
 also exercises OpenGL under Xvfb. New operations have ordinary service telemetry.
 
 The executive summary: shared devices, real media, explicit limits, and no
-language-specific facade. [Release v0.2.0](https://github.com/jordanhubbard/RemoteOS-SDL/releases/tag/v0.2.0).
+language-specific facade. [Release v0.2.1](https://github.com/jordanhubbard/RemoteOS-SDL/releases/tag/v0.2.1).

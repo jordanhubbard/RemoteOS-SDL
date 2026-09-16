@@ -108,7 +108,9 @@ host file-export API to save bytes under host policy. Streaming is not included.
 New operations participate in ordinary per-operation service telemetry.
 `REMOTEOS_3D_BACKEND=opengl` requires OpenGL; `software` forces the deterministic
 fallback. Unset chooses OpenGL when available, then software. The GL path uses
-an offscreen hidden window with readback, not a retained GPU scene.
+an explicit offscreen framebuffer in a hidden context with readback, not a
+retained GPU scene. Service 0.2.1 fixes the undefined hidden-window framebuffer
+behavior observed on NVIDIA GB10 in 0.2.0.
 
 PythonOS and RubyOS advance this protocol and service together. There is no
 compatibility facade: breaking semantics increments the version and all clients

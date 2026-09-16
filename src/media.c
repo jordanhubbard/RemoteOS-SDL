@@ -1,5 +1,6 @@
 #include "media.h"
 #include <SDL_opengl.h>
+#include <SDL_opengl_glext.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,35 @@ static SDL_Window *gl_window;
 static SDL_GLContext gl_context;
 static const char *renderer = "software-depth";
 const char *media_renderer(void) { return renderer; }
+
+/* Hidden native-window framebuffers are undefined on some drivers. Render
+ * into explicitly allocated attachments, independent of window visibility. */
+static PFNGLGENFRAMEBUFFERSPROC gen_framebuffers;
+static PFNGLDELETEFRAMEBUFFERSPROC delete_framebuffers;
+static PFNGLBINDFRAMEBUFFERPROC bind_framebuffer;
+static PFNGLGENRENDERBUFFERSPROC gen_renderbuffers;
+static PFNGLDELETERENDERBUFFERSPROC delete_renderbuffers;
+static PFNGLBINDRENDERBUFFERPROC bind_renderbuffer;
+static PFNGLRENDERBUFFERSTORAGEPROC renderbuffer_storage;
+static PFNGLFRAMEBUFFERRENDERBUFFERPROC framebuffer_renderbuffer;
+static PFNGLCHECKFRAMEBUFFERSTATUSPROC check_framebuffer;
+static void *gl_proc(const char *core, const char *extension) {
+    void *fn=SDL_GL_GetProcAddress(core);
+    return fn ? fn : SDL_GL_GetProcAddress(extension);
+}
+static int load_framebuffer_api(void) {
+    gen_framebuffers=(PFNGLGENFRAMEBUFFERSPROC)gl_proc("glGenFramebuffers","glGenFramebuffersEXT");
+    delete_framebuffers=(PFNGLDELETEFRAMEBUFFERSPROC)gl_proc("glDeleteFramebuffers","glDeleteFramebuffersEXT");
+    bind_framebuffer=(PFNGLBINDFRAMEBUFFERPROC)gl_proc("glBindFramebuffer","glBindFramebufferEXT");
+    gen_renderbuffers=(PFNGLGENRENDERBUFFERSPROC)gl_proc("glGenRenderbuffers","glGenRenderbuffersEXT");
+    delete_renderbuffers=(PFNGLDELETERENDERBUFFERSPROC)gl_proc("glDeleteRenderbuffers","glDeleteRenderbuffersEXT");
+    bind_renderbuffer=(PFNGLBINDRENDERBUFFERPROC)gl_proc("glBindRenderbuffer","glBindRenderbufferEXT");
+    renderbuffer_storage=(PFNGLRENDERBUFFERSTORAGEPROC)gl_proc("glRenderbufferStorage","glRenderbufferStorageEXT");
+    framebuffer_renderbuffer=(PFNGLFRAMEBUFFERRENDERBUFFERPROC)gl_proc("glFramebufferRenderbuffer","glFramebufferRenderbufferEXT");
+    check_framebuffer=(PFNGLCHECKFRAMEBUFFERSTATUSPROC)gl_proc("glCheckFramebufferStatus","glCheckFramebufferStatusEXT");
+    return gen_framebuffers && delete_framebuffers && bind_framebuffer && gen_renderbuffers &&
+        delete_renderbuffers && bind_renderbuffer && renderbuffer_storage && framebuffer_renderbuffer && check_framebuffer ? 0 : -1;
+}
 
 /* Clip before perspective division, including triangles crossing the eye. */
 static double plane(MediaVertex v, int p) {
@@ -69,9 +99,22 @@ static int render_gl(SDL_Surface *s, const MediaVertex *v, size_t count, Uint32 
         gl_context=SDL_GL_CreateContext(gl_window);
         if (!gl_context) { SDL_DestroyWindow(gl_window); gl_window=NULL; return -1; }
     }
-    SDL_SetWindowSize(gl_window,s->w,s->h);
     if (SDL_GL_MakeCurrent(gl_window,gl_context)) return -1;
+    if (load_framebuffer_api()) return -1;
     while (glGetError()!=GL_NO_ERROR) {}
+    GLuint framebuffer=0, buffers[2]={0,0};
+    int error=1;
+    unsigned char *pixels=NULL;
+    gen_framebuffers(1,&framebuffer); gen_renderbuffers(2,buffers);
+    bind_framebuffer(GL_FRAMEBUFFER,framebuffer);
+    bind_renderbuffer(GL_RENDERBUFFER,buffers[0]);
+    renderbuffer_storage(GL_RENDERBUFFER,GL_RGBA8,s->w,s->h);
+    framebuffer_renderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_RENDERBUFFER,buffers[0]);
+    bind_renderbuffer(GL_RENDERBUFFER,buffers[1]);
+    renderbuffer_storage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,s->w,s->h);
+    framebuffer_renderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,buffers[1]);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0); glReadBuffer(GL_COLOR_ATTACHMENT0);
+    if (check_framebuffer(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE || glGetError()!=GL_NO_ERROR) goto done;
     glViewport(0,0,s->w,s->h); glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
     glDisable(GL_CULL_FACE); glDisable(GL_BLEND); glDisable(GL_DITHER);
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glMatrixMode(GL_MODELVIEW); glLoadIdentity();
@@ -80,11 +123,11 @@ static int render_gl(SDL_Surface *s, const MediaVertex *v, size_t count, Uint32 
     glBegin(GL_TRIANGLES);
     for (size_t i=0;i<count;i++) { glColor3d(v[i].r,v[i].g,v[i].b); glVertex4d(v[i].x,v[i].y,v[i].z,v[i].w); }
     glEnd();
-    unsigned char *pixels=malloc((size_t)s->w*s->h*4);
-    if (!pixels) return -1;
+    pixels=malloc((size_t)s->w*s->h*4);
+    if (!pixels) goto done;
     glPixelStorei(GL_PACK_ALIGNMENT,1);
     glReadPixels(0,0,s->w,s->h,GL_RGBA,GL_UNSIGNED_BYTE,pixels);
-    int error=glGetError()!=GL_NO_ERROR;
+    error=glGetError()!=GL_NO_ERROR;
     if (!error && SDL_LockSurface(s)==0) {
         for (int y=0;y<s->h;y++) for (int x=0;x<s->w;x++) {
             unsigned char *p=pixels+((size_t)(s->h-y-1)*s->w+x)*4;
@@ -92,7 +135,11 @@ static int render_gl(SDL_Surface *s, const MediaVertex *v, size_t count, Uint32 
         }
         SDL_UnlockSurface(s);
     } else error=1;
-    free(pixels); if (!error) renderer="opengl-depth";
+done:
+    free(pixels);
+    bind_framebuffer(GL_FRAMEBUFFER,0); bind_renderbuffer(GL_RENDERBUFFER,0);
+    delete_renderbuffers(2,buffers); delete_framebuffers(1,&framebuffer);
+    if (!error) renderer="opengl-depth";
     return error ? -1 : 0;
 }
 int media_render(SDL_Surface *s, const MediaVertex *vertices, size_t count, Uint32 clear) {

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-15
+
+- Render OpenGL scenes into explicit offscreen framebuffer attachments rather
+  than a hidden window's undefined default framebuffer. Reproduced and verified
+  on the DGX Spark NVIDIA GB10, alongside Mesa/Xvfb and software tests.
+- Load core/EXT framebuffer entry points for the OpenGL 2.1 host boundary.
+
 ## [0.2.0] - 2026-09-15
 
 - Add language-neutral depth-buffered triangle rendering with OpenGL and

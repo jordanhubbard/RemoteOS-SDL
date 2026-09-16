@@ -74,7 +74,8 @@ def main():
                     row = height-1-y if height > 0 else y
                     start = offset+row*stride+x*(bits//8)
                     return tuple(data[start:start+3])
-                assert pixel("depth.bmp") == (0, 255, 0)
+                depth_pixel = pixel("depth.bmp")
+                assert depth_pixel == (0, 255, 0), (backend, depth_pixel)
                 call("scene3d.render", handle=fb, vertices=far+near, clear=0)
                 assert pixel("reverse.bmp") == (0, 255, 0)
                 call("scene3d.render", handle=fb, vertices=vertices(2, [1, 0, 0]), clear=0x123456)
