@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-15
+
+- Add language-neutral depth-buffered triangle rendering with OpenGL and
+  software backends, homogeneous clipping and bounded geometry.
+- Add FFmpeg clip decoding, keyframe seeking, audio-clocked playback with
+  pause/resume, and bounded Matroska export with MPEG-4 video and stereo PCM.
+- Keep protocol v2; advertise additive capabilities and retain per-operation
+  telemetry. Close media resources on disconnect and validate typed handles.
+- Add Linux/macOS FFmpeg dependencies and real codec, A/V clock, export round-trip,
+  depth/clipping and Linux OpenGL tests. Keep three-platform release artifacts.
+
 ## [0.1.1] - 2026-09-15
 
 - Add Linux ARM64 to CI and release packages alongside Linux x86_64 and macOS.

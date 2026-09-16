@@ -45,6 +45,71 @@ cannot be batched. The service rejects batches above its negotiated limit.
 
 ## Evolution
 
+### Multimedia extensions (service 0.2.0)
+
+The additive v2 features `scene3d.render`, `video.decode`, `video.playback`
+and `video.encode` advertise:
+
+| Operation | Parameters / payload | Result |
+| --- | --- | --- |
+| `scene3d.render` | `handle`, `vertices`, optional RGB `clear` | `backend`, `triangles` |
+| `video.open` | `payload_len` and encoded bytes in binary trailer | `handle`, `width`, `height` |
+| `video.frame` | video `handle`, surface `destination` | `eof`, `seconds` |
+| `video.seek` | video `handle`, `seconds` | empty success |
+| `video.close` | video `handle` | empty success |
+| `video.play` / `video.pause` | video `handle` | empty success |
+| `video.tick` | video `handle`, surface `destination` | `eof`, `seconds`, `playing` |
+| `encoder.open` | even `width`, `height`, integer `fps`, boolean `audio` | `handle` |
+| `encoder.frame` | encoder `handle`, surface `source`, optional PCM trailer | empty success |
+| `encoder.finish` | encoder `handle` | encoded `bytes` count |
+| `encoder.read` | finished encoder `handle`, byte `offset` | hex `data`, `eof` |
+| `encoder.close` | encoder `handle` | empty success |
+
+Each triangle comprises three `[x,y,z,w,r,g,b]` vertices. Coordinates are
+homogeneous clip space (six planes `-w <= x,y,z <= w`), colors are 0..1.
+Components must be finite, with coordinate magnitude at most 1e6. Rendering
+clears the destination and depth buffer, clips, performs perspective division
+and depth testing, and interpolates colors. Maximum 16384 triangles per call,
+2048x2048 32-bit target. Empty geometry clears the target. The normal frame-byte
+limit also applies. Backend is `opengl-depth` or `software-depth`.
+
+Video accepts at most 16 MiB encoded bytes and four simultaneous handles.
+FFmpeg decodes MOV/MP4, Matroska/WebM, AVI, Ogg or GIF containers, subject to
+the installed decoder build. No guest-supplied host paths or URLs are accepted.
+Source and destination dimensions are bounded at 4096; decoded frames scale
+into the destination surface's pixel format. `video.frame` returns one frame
+and its presentation time, or `eof: true`; it does not present the display.
+Missing timestamps advance using the guessed frame rate (30 fps fallback).
+Seek accepts 0..86400 seconds and goes to a preceding keyframe; callers decode
+forward to the desired time. Malformed trailer lengths terminate the connection
+to avoid framing desynchronization. All video handles close on disconnect.
+
+Timed playback predecodes up to 60 seconds of audio (at most eight input channels)
+into 48 kHz stereo S16. Timestamp gaps become silence. Video follows SDL queue
+consumption; after audio ends, or for silent clips, it follows monotonic time.
+Call `video.tick` regularly to copy due frames, then present the destination.
+Pause freezes the clock; seek clears pending frames and replaces queued audio.
+Tick decodes at most 120 frames per call to bound catch-up work. Keep a stable
+destination size during playback. Seek before switching between timed playback
+and manual frame decoding. SDL device latency and tick cadence bound actual sync
+precision; this is not physical speaker-clock measurement. A backend may allow
+only one audio device: close independent PCM output before starting a movie.
+
+Export produces Matroska with MPEG-4 video and optional PCM S16LE stereo at
+48000 Hz. Even dimensions must be 2..2048, fps 1..60 and divide 48000. Each
+`encoder.frame` advances one frame and, when audio is enabled, requires exactly
+`48000/fps * 4` PCM bytes. Frame calls are ordered; mismatched input is rejected.
+Maximum two encoder handles, 60 seconds and 16 MiB encoded output. Finish flushes
+the codec and muxer; read returns up to 32768 bytes per chunk as hex. Closing
+before finish discards the export. Codec/output failures poison the encoder;
+close it and start a new one. Handles also close on disconnect. Use the existing
+host file-export API to save bytes under host policy. Streaming is not included.
+
+New operations participate in ordinary per-operation service telemetry.
+`REMOTEOS_3D_BACKEND=opengl` requires OpenGL; `software` forces the deterministic
+fallback. Unset chooses OpenGL when available, then software. The GL path uses
+an offscreen hidden window with readback, not a retained GPU scene.
+
 PythonOS and RubyOS advance this protocol and service together. There is no
 compatibility facade: breaking semantics increments the version and all clients
 move in the same release train. OS names, language types, guest transport choices,

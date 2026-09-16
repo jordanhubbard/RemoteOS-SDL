@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -37,6 +38,7 @@
 #include "cJSON.h"
 #include "font.h"
 #include "protocol.h"
+#include "media.h"
 
 typedef struct {
     uint64_t started_ticks;
@@ -425,6 +427,8 @@ typedef enum {
     HK_NONE    = 0,
     HK_SURFACE = 1,
     HK_FONT    = 2,
+    HK_VIDEO   = 3,
+    HK_ENCODER = 4,
 } HandleKind;
 
 typedef struct {
@@ -474,6 +478,8 @@ static void handle_free(int h) {
     if (e->kind == HK_SURFACE && e->ptr && e->owned) {
         SDL_FreeSurface((SDL_Surface *)e->ptr);
     }
+    if (e->kind == HK_VIDEO && e->ptr) media_video_close(e->ptr);
+    if (e->kind == HK_ENCODER && e->ptr) media_encoder_close(e->ptr);
     e->kind  = HK_NONE;
     e->ptr   = NULL;
     e->owned = 0;
@@ -740,11 +746,19 @@ static int op_hello(BridgeState *st, int id, cJSON *params) {
     cJSON_AddItemToArray(features, cJSON_CreateString("file.drop"));
     cJSON_AddItemToArray(features, cJSON_CreateString("file.export"));
     cJSON_AddItemToArray(features, cJSON_CreateString("audio.pcm"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("scene3d.render"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("video.playback"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("video.encode"));
+    cJSON_AddItemToArray(features, cJSON_CreateString("video.decode"));
     cJSON_AddItemToArray(features, cJSON_CreateString("telemetry.snapshot"));
     cJSON_AddItemToObject(r, "features", features);
     cJSON *limits = cJSON_CreateObject();
     cJSON_AddNumberToObject(limits, "frame_bytes", REMOTEOS_MAX_FRAME_BYTES);
     cJSON_AddNumberToObject(limits, "batch_ops", REMOTEOS_MAX_BATCH_OPS);
+    cJSON_AddNumberToObject(limits, "scene3d_triangles", 16384);
+    cJSON_AddNumberToObject(limits, "scene3d_dimension", 2048);
+    cJSON_AddNumberToObject(limits, "video_bytes", 16*1024*1024);
+    cJSON_AddNumberToObject(limits, "video_handles", 4);
     cJSON_AddNumberToObject(limits, "event_queue", EVENT_QUEUE_CAP);
     cJSON_AddNumberToObject(limits, "file_chunk_bytes", REMOTEOS_FILE_CHUNK_BYTES);
     cJSON_AddItemToObject(r, "limits", limits);
@@ -1239,6 +1253,7 @@ static int op_surface_create(BridgeState *st, int id, cJSON *params) {
 static int op_surface_destroy(BridgeState *st, int id, cJSON *params) {
     cJSON *jh = cJSON_GetObjectItemCaseSensitive(params, "handle");
     if (!cJSON_IsNumber(jh)) return send_err(st->fd, id, 4, "handle required");
+    if (!handle_get(jh->valueint)) return send_err(st->fd, id, 4, "surface handle required");
     handle_free(jh->valueint);
     return send_ok(st->fd, id, NULL);
 }
@@ -1967,11 +1982,172 @@ static int op_render_batch(BridgeState *st, int id, cJSON *params) {
 }
 
 /* Dispatch table — keep small and stable; input/audio ops land in later slices. */
+static int op_scene3d_render(BridgeState *st, int id, cJSON *params) {
+    cJSON *jh=cJSON_GetObjectItemCaseSensitive(params,"handle");
+    cJSON *jv=cJSON_GetObjectItemCaseSensitive(params,"vertices");
+    cJSON *jc=cJSON_GetObjectItemCaseSensitive(params,"clear");
+    SDL_Surface *surface=cJSON_IsNumber(jh) ? handle_get(jh->valueint) : NULL;
+    int n=cJSON_GetArraySize(jv);
+    if (!surface || !cJSON_IsArray(jv) || n>49152 || n%3)
+        return send_err(st->fd,id,4,"surface and at most 16384 triangles required");
+    MediaVertex *vertices=calloc((size_t)n+1,sizeof(*vertices));
+    if (!vertices) return send_err(st->fd,id,12,"OOM");
+    if (jc && (!cJSON_IsNumber(jc) || !isfinite(jc->valuedouble) || jc->valuedouble<0 || jc->valuedouble>0xffffff)) {
+        free(vertices); return send_err(st->fd,id,4,"clear must be an RGB integer");
+    }
+    int i=0;
+    cJSON *row=NULL;
+    cJSON_ArrayForEach(row,jv) {
+        if (!cJSON_IsArray(row) || cJSON_GetArraySize(row)!=7) { free(vertices); return send_err(st->fd,id,4,"vertex requires x,y,z,w,r,g,b"); }
+        double values[7];
+        for (int j=0;j<7;j++) {
+            cJSON *value=cJSON_GetArrayItem(row,j);
+            if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble) || fabs(value->valuedouble)>1e6 || (j>=4 && (value->valuedouble<0 || value->valuedouble>1))) {
+                free(vertices); return send_err(st->fd,id,4,"invalid vertex component");
+            }
+            values[j]=value->valuedouble;
+        }
+        vertices[i]=(MediaVertex){values[0],values[1],values[2],values[3],values[4],values[5],values[6]};
+        i++;
+    }
+    int rc=media_render(surface,vertices,(size_t)n,cJSON_IsNumber(jc) ? (Uint32)jc->valuedouble : 0);
+    free(vertices);
+    if (rc) return send_err(st->fd,id,11,"3D render failed (surface limit 2048x2048)");
+    cJSON *r=cJSON_CreateObject(); cJSON_AddStringToObject(r,"backend",media_renderer());
+    cJSON_AddNumberToObject(r,"triangles",n/3); return send_ok(st->fd,id,r);
+}
+static int op_video_open(BridgeState *st, int id, cJSON *params) {
+    cJSON *jp=cJSON_GetObjectItemCaseSensitive(params,"payload_len");
+    if (!cJSON_IsNumber(jp) || jp->valuedouble<1 || jp->valuedouble>REMOTEOS_MAX_FRAME_BYTES || floor(jp->valuedouble)!=jp->valuedouble) return -1;
+    char *bytes=NULL;
+    if (read_payload_trailer(st->fd,(size_t)jp->valuedouble,&bytes)) return -1;
+    int live=0;
+    for (int i=1;i<MAX_HANDLES;i++) if (g_handles[i].kind==HK_VIDEO) live++;
+    MediaVideo *video=live<4 ? media_video_open(bytes,(size_t)jp->valuedouble) : NULL;
+    free(bytes);
+    if (!video) return send_err(st->fd,id,9,"video decode initialization failed or four-video limit exceeded");
+    int handle=handle_alloc_kind(HK_VIDEO,video,1);
+    if (!handle) { media_video_close(video); return send_err(st->fd,id,10,"handle table full"); }
+    cJSON *r=cJSON_CreateObject(); cJSON_AddNumberToObject(r,"handle",handle);
+    cJSON_AddNumberToObject(r,"width",media_video_width(video));
+    cJSON_AddNumberToObject(r,"height",media_video_height(video)); return send_ok(st->fd,id,r);
+}
+static int op_video_frame(BridgeState *st, int id, cJSON *params) {
+    cJSON *jh=cJSON_GetObjectItemCaseSensitive(params,"handle"), *jd=cJSON_GetObjectItemCaseSensitive(params,"destination");
+    MediaVideo *video=cJSON_IsNumber(jh) ? handle_get_typed(jh->valueint,HK_VIDEO) : NULL;
+    SDL_Surface *dst=cJSON_IsNumber(jd) ? handle_get(jd->valueint) : NULL;
+    if (!video || !dst) return send_err(st->fd,id,7,"video and destination surface required");
+    double seconds=0; int rc=media_video_next(video,dst,&seconds);
+    if (rc<0) return send_err(st->fd,id,9,"video decoding failed");
+    cJSON *r=cJSON_CreateObject(); cJSON_AddBoolToObject(r,"eof",rc==0);
+    cJSON_AddNumberToObject(r,"seconds",seconds); return send_ok(st->fd,id,r);
+}
+static int op_video_seek(BridgeState *st, int id, cJSON *params) {
+    cJSON *jh=cJSON_GetObjectItemCaseSensitive(params,"handle"), *jt=cJSON_GetObjectItemCaseSensitive(params,"seconds");
+    MediaVideo *video=cJSON_IsNumber(jh) ? handle_get_typed(jh->valueint,HK_VIDEO) : NULL;
+    if (!video || !cJSON_IsNumber(jt) || media_video_seek(video,jt->valuedouble)) return send_err(st->fd,id,4,"video seek failed");
+    return send_ok(st->fd,id,NULL);
+}
+static int op_video_close(BridgeState *st, int id, cJSON *params) {
+    cJSON *jh=cJSON_GetObjectItemCaseSensitive(params,"handle");
+    if (!cJSON_IsNumber(jh) || !handle_get_typed(jh->valueint,HK_VIDEO)) return send_err(st->fd,id,7,"invalid video handle");
+    handle_free(jh->valueint); return send_ok(st->fd,id,NULL);
+}
+
+static void *media_handle(cJSON *params, HandleKind kind) {
+    cJSON *value=cJSON_GetObjectItemCaseSensitive(params,"handle");
+    return cJSON_IsNumber(value) ? handle_get_typed(value->valueint,kind) : NULL;
+}
+static int op_video_play(BridgeState *st, int id, cJSON *params) {
+    MediaVideo *video=media_handle(params,HK_VIDEO);
+    if (!video || media_video_play(video)<0) return send_err(st->fd,id,9,"video playback failed (audio/device/60-second limit)");
+    return send_ok(st->fd,id,NULL);
+}
+static int op_video_pause(BridgeState *st, int id, cJSON *params) {
+    MediaVideo *video=media_handle(params,HK_VIDEO);
+    if (!video) return send_err(st->fd,id,7,"invalid video handle");
+    media_video_pause(video); return send_ok(st->fd,id,NULL);
+}
+static int op_video_tick(BridgeState *st, int id, cJSON *params) {
+    MediaVideo *video=media_handle(params,HK_VIDEO);
+    cJSON *jd=cJSON_GetObjectItemCaseSensitive(params,"destination");
+    SDL_Surface *surface=cJSON_IsNumber(jd) ? handle_get(jd->valueint) : NULL;
+    double seconds=0; int playing=0;
+    int rc=video && surface ? media_video_tick(video,surface,&seconds,&playing) : -1;
+    if (rc<0) return send_err(st->fd,id,9,"video tick failed");
+    cJSON *r=cJSON_CreateObject(); cJSON_AddBoolToObject(r,"eof",rc==1);
+    cJSON_AddBoolToObject(r,"playing",playing); cJSON_AddNumberToObject(r,"seconds",seconds);
+    return send_ok(st->fd,id,r);
+}
+static int op_encoder_open(BridgeState *st, int id, cJSON *params) {
+    cJSON *w=cJSON_GetObjectItemCaseSensitive(params,"width"), *h=cJSON_GetObjectItemCaseSensitive(params,"height");
+    cJSON *fps=cJSON_GetObjectItemCaseSensitive(params,"fps"), *audio=cJSON_GetObjectItemCaseSensitive(params,"audio");
+    int live=0; for (int i=1;i<MAX_HANDLES;i++) if (g_handles[i].kind==HK_ENCODER) live++;
+    MediaEncoder *e=NULL;
+    if (live<2 && cJSON_IsNumber(w) && cJSON_IsNumber(h) && cJSON_IsNumber(fps))
+        e=media_encoder_open(w->valueint,h->valueint,fps->valueint,cJSON_IsTrue(audio));
+    if (!e) return send_err(st->fd,id,4,"encoder requires even dimensions 2..2048, fps 1..60 dividing 48000, at most two encoders");
+    int handle=handle_alloc_kind(HK_ENCODER,e,1);
+    if (!handle) { media_encoder_close(e); return send_err(st->fd,id,10,"handle table full"); }
+    cJSON *r=cJSON_CreateObject(); cJSON_AddNumberToObject(r,"handle",handle);
+    return send_ok(st->fd,id,r);
+}
+static int op_encoder_frame(BridgeState *st, int id, cJSON *params) {
+    cJSON *length=cJSON_GetObjectItemCaseSensitive(params,"payload_len");
+    size_t size=0; char *pcm=NULL;
+    if (length) {
+        if (!cJSON_IsNumber(length) || !isfinite(length->valuedouble) || length->valuedouble<0 || length->valuedouble>192000 || floor(length->valuedouble)!=length->valuedouble) return -1;
+        size=(size_t)length->valuedouble;
+        if (read_payload_trailer(st->fd,size,&pcm)) return -1;
+    }
+    MediaEncoder *e=media_handle(params,HK_ENCODER);
+    cJSON *source=cJSON_GetObjectItemCaseSensitive(params,"source");
+    SDL_Surface *surface=cJSON_IsNumber(source) ? handle_get(source->valueint) : NULL;
+    int rc=media_encoder_frame(e,surface,pcm,size); free(pcm);
+    if (rc<0) return send_err(st->fd,id,9,"encode failed: dimensions, PCM length, state, 60 seconds or 16 MiB limit");
+    return send_ok(st->fd,id,NULL);
+}
+static int op_encoder_finish(BridgeState *st, int id, cJSON *params) {
+    MediaEncoder *e=media_handle(params,HK_ENCODER); size_t size=0;
+    if (media_encoder_finish(e)<0 || !media_encoder_data(e,&size)) return send_err(st->fd,id,9,"encoder finish failed");
+    cJSON *r=cJSON_CreateObject(); cJSON_AddNumberToObject(r,"bytes",(double)size);
+    return send_ok(st->fd,id,r);
+}
+static int op_encoder_read(BridgeState *st, int id, cJSON *params) {
+    cJSON *offset=cJSON_GetObjectItemCaseSensitive(params,"offset"); size_t size=0;
+    const unsigned char *data=media_encoder_data(media_handle(params,HK_ENCODER),&size);
+    if (!data || !cJSON_IsNumber(offset) || !isfinite(offset->valuedouble) || offset->valuedouble<0 || offset->valuedouble>size || floor(offset->valuedouble)!=offset->valuedouble)
+        return send_err(st->fd,id,4,"finished encoder and valid offset required");
+    size_t start=(size_t)offset->valuedouble, count=size-start; if (count>32768) count=32768;
+    char hex[65537]; const char *digits="0123456789abcdef";
+    for (size_t i=0;i<count;i++) { hex[i*2]=digits[data[start+i]>>4]; hex[i*2+1]=digits[data[start+i]&15]; }
+    hex[count*2]=0;
+    cJSON *r=cJSON_CreateObject(); cJSON_AddStringToObject(r,"data",hex);
+    cJSON_AddBoolToObject(r,"eof",start+count==size); return send_ok(st->fd,id,r);
+}
+static int op_encoder_close(BridgeState *st, int id, cJSON *params) {
+    if (!media_handle(params,HK_ENCODER)) return send_err(st->fd,id,7,"invalid encoder handle");
+    handle_free(cJSON_GetObjectItemCaseSensitive(params,"handle")->valueint); return send_ok(st->fd,id,NULL);
+}
+
 static const struct {
     const char *name;
     op_handler  fn;
 } OP_TABLE[] = {
     { "hello",              op_hello              },
+    { "scene3d.render",     op_scene3d_render      },
+    { "video.open",         op_video_open          },
+    { "video.frame",        op_video_frame         },
+    { "video.seek",         op_video_seek          },
+    { "video.close",        op_video_close         },
+    { "video.play",         op_video_play          },
+    { "video.pause",        op_video_pause         },
+    { "video.tick",         op_video_tick          },
+    { "encoder.open",       op_encoder_open        },
+    { "encoder.frame",      op_encoder_frame       },
+    { "encoder.finish",     op_encoder_finish      },
+    { "encoder.read",       op_encoder_read        },
+    { "encoder.close",      op_encoder_close       },
     { "ping",               op_ping               },
     { "shutdown",           op_shutdown           },
     { "render.batch",       op_render_batch       },
@@ -2086,10 +2262,15 @@ static int serve_fd(int fd) {
         }
     }
     discard_all_exports();
+    for (int i=1;i<MAX_HANDLES;i++) {
+        if (g_handles[i].kind==HK_FONT && g_handles[i].ptr) TTF_CloseFont(g_handles[i].ptr);
+        handle_free(i);
+    }
     return st.should_exit ? 0 : 1;
 }
 
 static void cleanup_sdl(void) {
+    media_cleanup();
     if (g_audio_device) {
         SDL_CloseAudioDevice(g_audio_device);
         g_audio_device = 0;
