@@ -796,6 +796,29 @@ static int op_display_open(BridgeState *st, int id, cJSON *params) {
     const char *desktop_mode = getenv("REMOTEOS_SDL_MODE");
     int headless = desktop_mode && strcmp(desktop_mode, "headless") == 0;
 
+    /* REMOTEOS_SDL_SIZE=WxH overrides the size the guest asked for. A
+     * bare-metal guest has no environment and no way to learn what the
+     * host's display can do, so it asks for a conservative default; this
+     * lets whoever launched the service pick something that suits the
+     * screen. The reply always carries the size actually opened, which the
+     * guest is expected to adopt. Ignored when headless so captures and
+     * visual goldens keep the dimensions their callers chose. */
+    const char *size_override = headless ? NULL : getenv("REMOTEOS_SDL_SIZE");
+    if (size_override && *size_override) {
+        int ow = 0, oh = 0;
+        char extra = 0;
+        if (sscanf(size_override, "%dx%d%c", &ow, &oh, &extra) == 2 &&
+            ow >= 320 && oh >= 240 && ow <= 16384 && oh <= 16384) {
+            LOG_INFO("display.open: REMOTEOS_SDL_SIZE overrides %dx%d with %dx%d",
+                     w, h, ow, oh);
+            w = ow;
+            h = oh;
+        } else {
+            LOG_ERROR("display.open: ignoring malformed REMOTEOS_SDL_SIZE=\"%s\" "
+                      "(want WxH, 320x240 minimum)", size_override);
+        }
+    }
+
     if (g_window.open) {
         if (g_window.fb_handle) handle_free(g_window.fb_handle);
         SDL_DestroyTexture(g_window.texture);
@@ -811,7 +834,15 @@ static int op_display_open(BridgeState *st, int id, cJSON *params) {
         }
     }
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
-    Uint32 flags = headless ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN;
+    /* ALLOW_HIGHDPI lets the window acquire the display's full pixel
+     * density instead of being handed a low-resolution backing store that
+     * the OS then smooths up to size. Paired with the logical size set on
+     * the renderer below, the guest keeps drawing in the coordinates it
+     * asked for while the scale-up happens once, in the renderer, with the
+     * nearest-neighbour hint already set above. On a 1:1 display this is a
+     * no-op. */
+    Uint32 flags = headless ? SDL_WINDOW_HIDDEN
+                            : (SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     SDL_Window *win = SDL_CreateWindow(title,
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        w, h, flags);
@@ -830,6 +861,11 @@ static int op_display_open(BridgeState *st, int id, cJSON *params) {
         if (!renderer)
             renderer = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
         if (renderer) {
+            /* Pin the drawing coordinate system to what the guest asked
+             * for. SDL scales presentation -- and the mouse coordinates it
+             * reports -- so a high-density drawable never reaches the
+             * guest as a surprise change of resolution. */
+            SDL_RenderSetLogicalSize(renderer, w, h);
             fb = SDL_CreateRGBSurfaceWithFormat(
                 0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
             fb_owned = 1;
@@ -841,6 +877,14 @@ static int op_display_open(BridgeState *st, int id, cJSON *params) {
         SDL_DestroyWindow(win);
         return send_err(st->fd, id, 6, SDL_GetError());
     }
+    /* The framebuffer is the contract: everything reported below describes
+     * it. That matters on the window-surface fallback, where SDL hands back
+     * a surface at the drawable size -- on a high-density display that is
+     * larger than the size requested, and a guest told otherwise would
+     * paint into one corner of it. The renderer path creates fb at exactly
+     * w x h, so this is a no-op there. */
+    w = fb->w;
+    h = fb->h;
     g_window.win  = win;
     g_window.fb   = fb;
     g_window.fb_owned = fb_owned;
@@ -849,10 +893,12 @@ static int op_display_open(BridgeState *st, int id, cJSON *params) {
     g_window.h    = h;
     g_window.open = 1;
     g_window.fb_handle = handle_alloc(g_window.fb, /*owned=*/0);
-    LOG_INFO("display.open: %dx%d (%s) mode=%s backend=%s fb_handle=%d",
+    int drawable_w = w, drawable_h = h;
+    if (renderer) SDL_GetRendererOutputSize(renderer, &drawable_w, &drawable_h);
+    LOG_INFO("display.open: %dx%d (%s) mode=%s backend=%s drawable=%dx%d fb_handle=%d",
              w, h, title, headless ? "headless" : "interactive",
              renderer ? "renderer" : "window-surface",
-             g_window.fb_handle);
+             drawable_w, drawable_h, g_window.fb_handle);
 
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "handle", 1);
