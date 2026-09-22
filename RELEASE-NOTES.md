@@ -1,48 +1,53 @@
-# RemoteOS-SDL v0.2.1
+# RemoteOS-SDL v0.3.0
 
-## The actual GPU would like a word
+## The guest stops guessing how big the screen is
 
-0.2.1 fixes a driver-specific defect found by running the full media test on
-the DGX Spark NVIDIA GB10 after Mesa/Xvfb had passed. The hidden window's
-default framebuffer was not a valid offscreen rendering target. Explicit color
-and depth attachments now make that target independent of window visibility.
-The corrected path passes on real NVIDIA hardware and Mesa/Xvfb. This patch
-supersedes 0.2.0; its tag and artifacts remain intact for reproducibility.
+A bare-metal guest has no environment, no display enumeration, and no way to
+ask what the host is plugged into. So it asks for a number it picked at compile
+time — RubyOS asks for 1024x768 — and lives with it however large the monitor
+actually is. That was always the wrong side of the wire to decide on.
 
-## The display server has acquired a film department
+`REMOTEOS_SDL_SIZE=WxH` now lets whoever launches the service pick the size,
+and `display.open` reports back the framebuffer it actually created. The guest
+is expected to adopt that answer rather than assume it got what it asked for;
+PythonOS already did, and RubyOS now does too. Malformed or absurd values are
+logged and ignored instead of failing the open, and the override is skipped in
+headless mode so captures and visual goldens keep the dimensions their callers
+chose.
 
-One OS-neutral service now renders depth-buffered 3D, decodes video, plays
-short audiovisual clips against an audio-derived clock, and exports Matroska
-movies. PythonOS and RubyOS share the same implementation. Apparently two
-language kernels do not require two copies of every codec bug.
+## A latent bug on the fallback path
 
-Triangle scenes use homogeneous clipping and depth testing through OpenGL
-or the software fallback. Video uses FFmpeg; playback follows SDL's consumed
-audio samples, with pause/resume and seek. The host does the expensive work;
-the guest supplies scenes, timing, surfaces and optional PCM.
+`display.open` previously reported the size it was *asked* for. On the renderer
+path that was accidentally correct, because the framebuffer is created at
+exactly those dimensions. On the window-surface fallback it was not:
+`SDL_GetWindowSurface` returns a surface at the drawable size, so on a
+high-density display a guest was told a size smaller than the buffer it had
+been handed, and would have painted into one corner of it. The reply now always
+describes the framebuffer, whichever path produced it.
 
-Export accepts surfaces at fixed frame times, producing MPEG-4 video and
-optional 48 kHz stereo PCM in Matroska. No shell commands, guest host-paths,
-or network media URLs are part of that API.
+## Pixel density
 
-## Actual boundaries, because physics has declined our roadmap
+Windows are created with `SDL_WINDOW_ALLOW_HIGHDPI`, and the renderer is pinned
+to the guest's logical size. The guest keeps drawing in the coordinates it asked
+for while the scale-up happens once, in the renderer, with the nearest-neighbour
+hint the service already sets — instead of the guest receiving a low-resolution
+backing store that the OS then smooths up to fill the window.
 
-- Protocol v2 gains advertised capabilities; existing desktop clients still work.
-- Encoded inputs/outputs: 16 MiB. Four decoder handles, two encoder handles.
-- A/V playback predecodes at most 60 seconds of audio. Export caps at 60 seconds.
-- OpenGL uses a hidden context and readback; this is not a retained GPU scene.
-- Playback requires regular ticks from the client. SDL queue consumption is
-  the audio clock, not a promise of sample-exact physical speaker latency.
-- No streaming codec pipeline, texture/lighting system, or nonlinear editor.
-- The endpoint is still unauthenticated: use loopback or an authenticated tunnel.
+On a 1:1 display this is a measured no-op, which is all that could be verified
+during development:
 
-## Build, tests and packages
+```
+ALLOW_HIGHDPI=0  window=1024x768  renderer_output=1024x768
+ALLOW_HIGHDPI=1  window=1024x768  renderer_output=1024x768
+```
 
-FFmpeg development libraries (including swresample) and OpenGL join the SDL
-dependencies. Linux ARM64, Linux x86_64 and macOS ARM64 packages link host
-libraries; see README for installation. Release gates test real decode/encode,
-PCM round trips, playback clock behavior and software depth/clipping. Linux
-also exercises OpenGL under Xvfb. New operations have ordinary service telemetry.
+The high-density path is therefore **untested**. Someone on a Retina or scaled
+display should confirm that mouse coordinates and framebuffer dimensions stay
+correct before relying on it.
 
-The executive summary: shared devices, real media, explicit limits, and no
-language-specific facade. [Release v0.2.1](https://github.com/jordanhubbard/RemoteOS-SDL/releases/tag/v0.2.1).
+## Compatibility
+
+No protocol change: this is still protocol v2, and `display.open` takes the
+same parameters. A guest that ignores the reported size keeps working exactly
+as before, at the size it requested, unless an operator sets
+`REMOTEOS_SDL_SIZE`.
